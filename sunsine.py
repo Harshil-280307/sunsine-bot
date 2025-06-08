@@ -11,14 +11,15 @@ import random
 load_dotenv()
 
 # Flask app to keep bot alive
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Sunsine Bot is shining ☀️💛"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     Thread(target=run).start()
@@ -49,30 +50,42 @@ async def on_message(message):
     content = message.content.strip().lower()
     channel_id = str(message.channel.id)
 
-    # ON/OFF Commands using "! sunsine on" and "! sunsine off"
-    if content == "! sunsine on":
+    # ON/OFF Commands
+    if content == "!sunsine on":
         bot_enabled[channel_id] = True
         await message.channel.send("Sunsine is glowing 🌞✨")
 
-    elif content == "! sunsine off":
+    elif content == "!sunsine off":
         bot_enabled[channel_id] = False
         await message.channel.send("Going quiet 🌙💤")
 
-    # Respond only if bot is ON
     elif bot_enabled.get(channel_id, False):
-        if bot.user.mention in content or "sunsine" in content:
+        if bot.user.mention in message.content or "sunsine" in message.content.lower():
             await send_sweet_reply(message, content)
-        elif random.random() < 0.05:
+        elif random.random() < 0.05:  # Random 5% chance to auto-reply
             await send_sweet_reply(message, content, auto=True)
 
 async def send_sweet_reply(message, content, auto=False):
     try:
         prompt = f"Reply very short, sweet, flirty, and include emoji: {content}"
         reply = get_smart_reply(prompt, style="cute", mood="flirty")
-        if reply:
-            reply = reply.strip()
-            if len(reply.split()) > 10:
-                reply = "💖 You're so cute! 😘"
-            await message.channel.send(reply)
+
+        # If OpenRouter gives empty or broken reply, use fallback
+        if not reply or not isinstance(reply, str):
+            reply = "Awww you're adorable 💖"
+
+        reply = reply.strip()
+
+        # Optional: Limit overly long AI replies
+        if len(reply.split()) > 12:
+            reply = "You're just too sweet 🥺💘"
+
+        await message.channel.send(reply)
+
     except Exception as e:
         logging.error(f"AI Error: {e}")
+        await message.channel.send("Oops... got shy! 😳")
+
+# --- Start Flask and Bot ---
+keep_alive()
+bot.run(TOKEN)
