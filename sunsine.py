@@ -8,9 +8,10 @@ import os
 from dotenv import load_dotenv
 import random
 
+# Load environment variables
 load_dotenv()
 
-# Flask app to keep bot alive
+# Flask server to keep bot alive
 app = Flask(__name__)
 
 @app.route('/')
@@ -27,24 +28,22 @@ def keep_alive():
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
 
+# Load fallback replies from file
+fallback_replies = []
+try:
+    with open("fallback_sweet_replies.txt", "r", encoding="utf-8") as f:
+        fallback_replies = [line.strip() for line in f.readlines() if line.strip()]
+except Exception as e:
+    logging.error(f"Failed to load fallback replies: {e}")
+    fallback_replies = ["You're adorable 💖"]  # Fallback for fallback 😅
+
 # Discord setup
 intents = discord.Intents.default()
-intents.message_content = True  # VERY important for reading messages
-
+intents.message_content = True  # Needed for reading messages
 bot = discord.Client(intents=intents)
+
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-# Per-channel ON/OFF toggle
-bot_enabled = {}
-
-# Fallback replies if AI fails
-fallback_replies = [
-    "You're melting my circuits ☀️💕",
-    "Hehe you’re so cute 😚💛",
-    "Awww stop it, you’re making me blush ☺️✨",
-    "You're my sunshine! 🌼💫",
-    "So sweet, just like you 🥰🍯"
-]
+bot_enabled = {}  # Channel-wise on/off toggle
 
 @bot.event
 async def on_ready():
@@ -58,45 +57,48 @@ async def on_message(message):
     content = message.content.strip().lower()
     channel_id = str(message.channel.id)
 
-    # ON/OFF Commands
-    if content == "!sunshine on":
+    # Toggle Commands
+    if content == "!sunsine on":
         bot_enabled[channel_id] = True
         await message.channel.send("Sunsine is glowing 🌞✨")
+        return
 
-    elif content == "!sunshine off":
+    elif content == "!sunsine off":
         bot_enabled[channel_id] = False
         await message.channel.send("Going quiet 🌙💤")
+        return
 
-    elif bot_enabled.get(channel_id, False):
-        if bot.user.mention in message.content or "sunsine" in message.content.lower():
+    # Respond if bot is enabled in the channel
+    if bot_enabled.get(channel_id, False):
+        # If tagged or name mentioned
+        if bot.user.mention in message.content or "sunsine" in content:
             await send_sweet_reply(message, content)
-        elif random.random() < 0.50:  # Random 50% chance to auto-reply
+        # 5% chance to auto reply
+        elif random.random() < 0.05:
             await send_sweet_reply(message, content, auto=True)
 
 async def send_sweet_reply(message, content, auto=False):
     try:
         prompt = f"Reply very short, sweet, flirty, and include emoji: {content}"
-        reply = get_smart_reply(prompt, style="cute", mood="flirty")
+        reply = get_smart_reply(prompt)
 
-        logging.info(f"Prompt: {prompt}")
-        logging.info(f"AI Reply: {reply}")
+        logging.info(f"[Prompt] {prompt}")
+        logging.info(f"[OpenRouter Reply] {reply}")
 
-        # Fallback if reply is broken
+        # If OpenRouter fails or returns nothing
         if not reply or not isinstance(reply, str):
             reply = random.choice(fallback_replies)
 
-        reply = reply.strip()
-
-        # Optional: Limit overly long AI replies
+        # Optional shortener
         if len(reply.split()) > 12:
             reply = "You're just too sweet 🥺💘"
 
-        await message.channel.send(reply)
+        await message.channel.send(reply.strip())
 
     except Exception as e:
         logging.error(f"AI Error: {e}")
-        await message.channel.send("Oops... got shy! 😳")
+        await message.channel.send(random.choice(fallback_replies))
 
-# --- Start Flask and Bot ---
+# --- Launch everything ---
 keep_alive()
 bot.run(TOKEN)
