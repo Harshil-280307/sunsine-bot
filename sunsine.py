@@ -59,18 +59,18 @@ async def on_message(message):
     channel_id = str(message.channel.id)
 
     # ON/OFF Commands
-    if content == "!sunsine on":
+    if content == "!sunshine on":
         bot_enabled[channel_id] = True
         await message.channel.send("Sunsine is glowing 🌞✨")
 
-    elif content == "!sunsine off":
+    elif content == "!sunshine off":
         bot_enabled[channel_id] = False
         await message.channel.send("Going quiet 🌙💤")
 
     elif bot_enabled.get(channel_id, False):
         if bot.user.mention in message.content or "sunsine" in message.content.lower():
             await send_sweet_reply(message, content)
-        elif random.random() < 0.05:  # Random 5% chance to auto-reply
+        elif random.random() < 0.50:  # Random 50% chance to auto-reply
             await send_sweet_reply(message, content, auto=True)
 
 async def send_sweet_reply(message, content, auto=False):
