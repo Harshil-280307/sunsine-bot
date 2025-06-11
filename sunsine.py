@@ -29,14 +29,22 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 
 # Discord setup
 intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
+intents.message_content = True  # VERY important for reading messages
 
 bot = discord.Client(intents=intents)
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 # Per-channel ON/OFF toggle
 bot_enabled = {}
+
+# Fallback replies if AI fails
+fallback_replies = [
+    "You're melting my circuits ☀️💕",
+    "Hehe you’re so cute 😚💛",
+    "Awww stop it, you’re making me blush ☺️✨",
+    "You're my sunshine! 🌼💫",
+    "So sweet, just like you 🥰🍯"
+]
 
 @bot.event
 async def on_ready():
@@ -70,9 +78,12 @@ async def send_sweet_reply(message, content, auto=False):
         prompt = f"Reply very short, sweet, flirty, and include emoji: {content}"
         reply = get_smart_reply(prompt, style="cute", mood="flirty")
 
-        # If OpenRouter gives empty or broken reply, use fallback
+        logging.info(f"Prompt: {prompt}")
+        logging.info(f"AI Reply: {reply}")
+
+        # Fallback if reply is broken
         if not reply or not isinstance(reply, str):
-            reply = "Awww you're adorable 💖"
+            reply = random.choice(fallback_replies)
 
         reply = reply.strip()
 
