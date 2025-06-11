@@ -24,6 +24,7 @@ def get_smart_reply(prompt, style="cute", mood="flirty"):
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
         result = response.json()
+        print("OpenRouter response:", result)  # Debug
         return result["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"OpenRouter error: {e}")
