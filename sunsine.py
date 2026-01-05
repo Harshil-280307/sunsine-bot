@@ -1,102 +1,109 @@
-import discord
-import asyncio
-from flask import Flask
-from threading import Thread
-from openrouter import get_smart_reply
-import logging
 import os
-from dotenv import load_dotenv
+import time
 import random
+import asyncio
+import logging
+from dotenv import load_dotenv
 
-# Load environment variables
+import discord
+from discord.ext import commands
+
+from openrouter import get_smart_reply
+
 load_dotenv()
 
-# Flask server to keep bot alive
-app = Flask(__name__)
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-@app.route('/')
-def home():
-    return "Sunsine Bot is shining ☀️💛"
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(message)s"
+)
 
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    Thread(target=run).start()
-
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
-
-# Load fallback replies
-fallback_replies = []
-try:
-    with open("fallback_sweet_replies.txt", "r", encoding="utf-8") as f:
-        fallback_replies = [line.strip() for line in f.readlines() if line.strip()]
-except Exception as e:
-    logging.error(f"⚠️ Failed to load fallback replies: {e}")
-    fallback_replies = ["You're adorable 💖"]
-
-# Discord setup
+# ---------- Discord Setup ----------
 intents = discord.Intents.default()
 intents.message_content = True
-bot = discord.Client(intents=intents)
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-bot_enabled = {}
+bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ---------- State ----------
+bot_enabled_channels = set()
+cooldowns = {}  # channel_id -> last_time
+COOLDOWN_SECONDS = 6
+
+# ---------- Load fallback replies ----------
+try:
+    with open("fallback_sweet_replies.txt", "r", encoding="utf-8") as f:
+        FALLBACK_REPLIES = [l.strip() for l in f if l.strip()]
+except:
+    FALLBACK_REPLIES = ["Hey cutie 💛"]
+
+# ---------- Events ----------
 @bot.event
 async def on_ready():
-    logging.info(f"🌞 Sunsine is online as {bot.user}")
+    logging.info(f"🌞 Sunsine online as {bot.user}")
 
+# ---------- Commands ----------
+@bot.command()
+async def sunsine(ctx, mode: str):
+    mode = mode.lower()
+
+    if mode == "on":
+        bot_enabled_channels.add(ctx.channel.id)
+        await ctx.send("Sunsine is glowing 🌞✨")
+
+    elif mode == "off":
+        bot_enabled_channels.discard(ctx.channel.id)
+        await ctx.send("Going quiet 🌙💤")
+
+    else:
+        await ctx.send("Use `!sunsine on` or `!sunsine off`")
+
+# ---------- Message Listener ----------
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    content = message.content.strip().lower()
-    channel_id = str(message.channel.id)
+    await bot.process_commands(message)
 
-    # Toggle ON/OFF
-    if content == "!sunsine on":
-        bot_enabled[channel_id] = True
-        await message.channel.send("Sunsine is glowing 🌞✨")
+    if message.channel.id not in bot_enabled_channels:
         return
 
-    elif content == "!sunsine off":
-        bot_enabled[channel_id] = False
-        await message.channel.send("Going quiet 🌙💤")
+    content = message.content.lower()
+
+    if bot.user.mentioned_in(message) or "sunsine" in content:
+        await handle_ai_reply(message)
+
+# ---------- AI Reply ----------
+async def handle_ai_reply(message):
+    now = time.time()
+    last = cooldowns.get(message.channel.id, 0)
+
+    if now - last < COOLDOWN_SECONDS:
         return
 
-    # If bot is ON in this channel
-    if bot_enabled.get(channel_id, False):
-        mentioned = bot.user in message.mentions
-        has_name = "sunsine" in content
+    cooldowns[message.channel.id] = now
 
-        if mentioned or has_name:
-            await send_sweet_reply(message, content)
-        elif random.random() < 0.05:
-            await send_sweet_reply(message, content, auto=True)
+    prompt = f"Reply sweetly to: {message.content}"
 
-async def send_sweet_reply(message, content, auto=False):
     try:
-        prompt = f"Reply very short, sweet, flirty, and include emoji: {content}"
-        reply = get_smart_reply(prompt)
-        logging.info(f"[Prompt] {prompt}")
-        logging.info(f"[OpenRouter Reply] {reply}")
+        loop = asyncio.get_running_loop()
+        reply = await loop.run_in_executor(
+            None, get_smart_reply, prompt
+        )
 
-        if not reply or not isinstance(reply, str):
-            reply = random.choice(fallback_replies)
-
-        if len(reply.split()) > 12:
-            reply = "You're just too sweet 🥺💘"
-
-        await message.channel.send(reply.strip())
+        if not reply:
+            reply = random.choice(FALLBACK_REPLIES)
 
     except Exception as e:
-        logging.error(f"AI Error: {e}")
-        await message.channel.send(random.choice(fallback_replies))
+        logging.error(f"AI error: {e}")
+        reply = random.choice(FALLBACK_REPLIES)
 
-# --- Start it all ---
-keep_alive()
+    await message.channel.send(reply)
+
+# ---------- Run ----------
+if not TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN missing")
+
 bot.run(TOKEN)
