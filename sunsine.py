@@ -3,12 +3,14 @@ import time
 import random
 import asyncio
 import logging
+import threading
 from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands
 
 from openrouter import get_smart_reply
+from web import run_web
 
 load_dotenv()
 
@@ -28,7 +30,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- State ----------
 bot_enabled_channels = set()
-cooldowns = {}  # channel_id -> last_time
+cooldowns = {}
 COOLDOWN_SECONDS = 6
 
 # ---------- Load fallback replies ----------
@@ -70,9 +72,7 @@ async def on_message(message):
     if message.channel.id not in bot_enabled_channels:
         return
 
-    content = message.content.lower()
-
-    if bot.user.mentioned_in(message) or "sunsine" in content:
+    if bot.user.mentioned_in(message) or "sunsine" in message.content.lower():
         await handle_ai_reply(message)
 
 # ---------- AI Reply ----------
@@ -84,26 +84,25 @@ async def handle_ai_reply(message):
         return
 
     cooldowns[message.channel.id] = now
-
     prompt = f"Reply sweetly to: {message.content}"
 
     try:
         loop = asyncio.get_running_loop()
-        reply = await loop.run_in_executor(
-            None, get_smart_reply, prompt
-        )
-
+        reply = await loop.run_in_executor(None, get_smart_reply, prompt)
         if not reply:
             reply = random.choice(FALLBACK_REPLIES)
-
     except Exception as e:
         logging.error(f"AI error: {e}")
         reply = random.choice(FALLBACK_REPLIES)
 
     await message.channel.send(reply)
 
-# ---------- Run ----------
+# ---------- Start Web + Bot ----------
 if not TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN missing")
 
+# Start web server in background thread
+threading.Thread(target=run_web, daemon=True).start()
+
+# Start Discord bot (MAIN THREAD)
 bot.run(TOKEN)
