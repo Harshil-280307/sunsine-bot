@@ -52,11 +52,11 @@ async def on_ready():
 
 # ---------- COMMAND ----------
 @bot.command()
-async def sunsine(ctx, mode: str):
+async def sunshine(ctx, mode: str):
     mode = mode.lower()
     if mode == "on":
         bot_enabled_channels.add(ctx.channel.id)
-        await ctx.send("Sunsine is glowing 🌞✨")
+        await ctx.send("Sunshine is glowing 🌞✨")
     elif mode == "off":
         bot_enabled_channels.discard(ctx.channel.id)
         await ctx.send("Going quiet 🌙💤")
@@ -98,7 +98,7 @@ async def maybe_reply(message, cid):
         return
 
     # chance logic
-    if bot.user.mentioned_in(message) or "sunsine" in text:
+    if bot.user.mentioned_in(message) or "sunshine" in text:
         chance = 1.0
     else:
         chance = 0.9  # natural participation
