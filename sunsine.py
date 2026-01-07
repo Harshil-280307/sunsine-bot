@@ -48,7 +48,7 @@ except:
 # ---------- EVENTS ----------
 @bot.event
 async def on_ready():
-    logging.info(f"🌞 Sunsine online as {bot.user}")
+    logging.info(f"🌞 Sunshine online as {bot.user}")
 
 # ---------- COMMAND ----------
 @bot.command()
@@ -61,7 +61,7 @@ async def sunsine(ctx, mode: str):
         bot_enabled_channels.discard(ctx.channel.id)
         await ctx.send("Going quiet 🌙💤")
     else:
-        await ctx.send("Use `!sunsine on` or `!sunsine off`")
+        await ctx.send("Use `!sunshine on` or `!sunshine off`")
 
 # ---------- MESSAGE LISTENER ----------
 @bot.event
