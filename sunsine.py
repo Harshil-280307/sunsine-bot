@@ -238,7 +238,7 @@ async def maybe_reply(message, cid):
     if bot.user.mentioned_in(message) or "sunsine" in text:
         chance = 1.0
     else:
-        chance = 0.2  # natural participation
+        chance = 0.5  # natural participation
 
     if random.random() > chance:
         return
