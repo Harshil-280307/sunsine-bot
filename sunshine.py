@@ -1,634 +1,475 @@
-
 import os
-import time
-import random
 import asyncio
+import random
 import logging
-import sqlite3
-import threading
-
-from collections import deque
-from contextlib import closing
-
-from dotenv import load_dotenv
+from threading import Thread
+from collections import defaultdict, deque
 
 import discord
-from discord.ext import commands
+from flask import Flask
+from dotenv import load_dotenv
 
-from openrouter import (
-    get_smart_reply,
-    should_reply
-)
-
-from web import run_web
+from openrouter import get_smart_reply
 
 
-# =====================================================
-# CONFIG
-# =====================================================
+# ==================================================
+# Environment
+# ==================================================
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 if not TOKEN:
-
     raise RuntimeError(
-        "DISCORD_BOT_TOKEN missing"
+        "DISCORD_BOT_TOKEN is missing. Add it in Render Environment."
     )
 
 
-# =====================================================
-# LOGGING
-# =====================================================
+# ==================================================
+# Logging
+# ==================================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "[%(asctime)s] "
-        "[%(levelname)s] "
-        "%(message)s"
-    )
+    format="[%(asctime)s] [%(levelname)s] %(message)s",
 )
 
+logger = logging.getLogger("sunshine-bot")
 
-# =====================================================
-# DISCORD
-# =====================================================
+
+# ==================================================
+# Flask Keep-Alive Server
+# ==================================================
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "Sunshine Bot is running! 🌞", 200
+
+
+@app.route("/health")
+def health():
+    return {
+        "status": "online",
+        "bot": "Sunshine",
+    }, 200
+
+
+def run_flask():
+    port = int(os.getenv("PORT", "8080"))
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+    )
+
+
+flask_thread = Thread(
+    target=run_flask,
+    daemon=True,
+)
+
+flask_thread.start()
+
+
+# ==================================================
+# Discord Setup
+# ==================================================
 
 intents = discord.Intents.default()
-
+intents.messages = True
 intents.message_content = True
+intents.guilds = True
+intents.members = True
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
+client = discord.Client(intents=intents)
+
+
+# ==================================================
+# Sunshine Variables
+# ==================================================
+
+sunshine_mode = True
+
+# 0.30 means 30% chance of replying
+reply_chance = 0.30
+
+# Prevent too many replies in a short time
+reply_cooldown = 8
+
+last_reply_time = defaultdict(float)
+
+# Prevent multiple replies in the same channel
+active_channels = set()
+
+# Keep recent conversation for each channel
+conversation_memory = defaultdict(
+    lambda: deque(maxlen=12)
 )
 
 
-# =====================================================
-# DATABASE
-# =====================================================
+# ==================================================
+# Sunshine Personality Helpers
+# ==================================================
 
-DB_PATH = "sunshine.db"
+def style_reply(reply):
+    """
+    Cleans and styles the AI reply.
+    """
+
+    if not reply:
+        return "My brain just took a tiny vacation 🌞"
+
+    reply = str(reply).strip()
+
+    if not reply:
+        return "Wait, my brain is buffering 😭"
+
+    # Keep Discord replies short
+    if len(reply) > 1800:
+        reply = reply[:1797].rstrip() + "..."
+
+    return reply
 
 
-def db():
+def clean_bot_mentions(content):
+    """
+    Removes Sunshine mentions from the message.
+    """
 
-    return sqlite3.connect(
-        DB_PATH,
-        timeout=10
+    if not client.user:
+        return content
+
+    content = content.replace(
+        f"<@{client.user.id}>",
+        "",
     )
 
-
-def init_db():
-
-    with closing(db()) as conn:
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS
-            channel_settings (
-                channel_id INTEGER PRIMARY KEY,
-                enabled INTEGER DEFAULT 0,
-                chance INTEGER DEFAULT 30,
-                cooldown INTEGER DEFAULT 8
-            )
-        """)
-
-        conn.commit()
-
-
-def get_settings(channel_id):
-
-    with closing(db()) as conn:
-
-        row = conn.execute(
-            """
-            SELECT enabled, chance, cooldown
-            FROM channel_settings
-            WHERE channel_id = ?
-            """,
-            (channel_id,)
-        ).fetchone()
-
-        if row is None:
-
-            conn.execute(
-                """
-                INSERT INTO channel_settings
-                (channel_id, enabled, chance, cooldown)
-                VALUES (?, 0, 30, 8)
-                """,
-                (channel_id,)
-            )
-
-            conn.commit()
-
-            return {
-                "enabled": False,
-                "chance": 30,
-                "cooldown": 8
-            }
-
-        return {
-            "enabled": bool(row[0]),
-            "chance": row[1],
-            "cooldown": row[2]
-        }
-
-
-def update_settings(
-    channel_id,
-    enabled=None,
-    chance=None,
-    cooldown=None
-):
-
-    current = get_settings(channel_id)
-
-    if enabled is not None:
-        current["enabled"] = enabled
-
-    if chance is not None:
-        current["chance"] = chance
-
-    if cooldown is not None:
-        current["cooldown"] = cooldown
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE channel_settings
-            SET enabled = ?,
-                chance = ?,
-                cooldown = ?
-            WHERE channel_id = ?
-            """,
-            (
-                int(current["enabled"]),
-                current["chance"],
-                current["cooldown"],
-                channel_id
-            )
-        )
-
-        conn.commit()
-
-
-# =====================================================
-# MEMORY
-# =====================================================
-
-CONTEXT_LIMIT = 12
-
-channel_context = {}
-
-cooldowns = {}
-
-active_replies = set()
-
-
-# =====================================================
-# FALLBACK
-# =====================================================
-
-DEFAULT_FALLBACK = [
-
-    "Heyyy sunshine 🌞",
-    "I'm listening, cutie ✨",
-    "Ooo tell me more 😏",
-    "Hehe, you're funny 💛",
-    "What's happening, sweetheart? ☀️",
-    "Don't leave me hanging now 😌",
-    "Aww, tell me more 💛",
-    "You're making me smile 🌞"
-
-]
-
-
-def load_fallback():
-
-    try:
-
-        with open(
-            "fallback_sweet_replies.txt",
-            encoding="utf-8"
-        ) as f:
-
-            replies = [
-                line.strip()
-                for line in f
-                if line.strip()
-            ]
-
-            if replies:
-                return replies
-
-    except Exception as e:
-
-        logging.warning(
-            f"Fallback file error: {e}"
-        )
-
-    return DEFAULT_FALLBACK.copy()
-
-
-FALLBACK = load_fallback()
-
-
-# =====================================================
-# READY
-# =====================================================
-
-@bot.event
-async def on_ready():
-
-    logging.info(
-        f"🌞 Sunshine online as {bot.user}"
+    content = content.replace(
+        f"<@!{client.user.id}>",
+        "",
     )
 
+    return content.strip()
 
-# =====================================================
-# SUNSHINE COMMAND
-# =====================================================
 
-@bot.command()
-async def sunshine(ctx, mode: str = None):
+def is_directly_mentioned(message):
+    if not client.user:
+        return False
 
-    cid = ctx.channel.id
+    return client.user in message.mentions
 
-    if mode is None:
 
-        await ctx.send(
-            "Use `!sunshine on`, "
-            "`!sunshine off`, "
-            "or `!sunshine status`"
+def format_message(message):
+    """
+    Converts a Discord message into readable conversation text.
+    """
+
+    author = message.author.display_name
+    content = message.content.strip()
+
+    if not content:
+        return ""
+
+    return f"{author}: {content}"
+
+
+def build_conversation(channel_id):
+    """
+    Builds recent conversation context for the AI.
+    """
+
+    history = conversation_memory[channel_id]
+
+    if not history:
+        return ""
+
+    return "\n".join(history)
+
+
+def should_ignore_message(content):
+    """
+    Avoids replying to empty or useless messages.
+    """
+
+    if not content:
+        return True
+
+    if len(content.strip()) < 2:
+        return True
+
+    return False
+
+
+# ==================================================
+# Sunshine Commands
+# ==================================================
+
+async def handle_command(message, content_lower):
+    global sunshine_mode
+    global reply_chance
+    global reply_cooldown
+
+    if content_lower == "!sunshine off":
+        sunshine_mode = False
+
+        await message.channel.send(
+            "Okayyy, I’ll be quiet now 😌"
         )
 
-        return
+        return True
 
-    mode = mode.lower()
+    if content_lower == "!sunshine on":
+        sunshine_mode = True
 
-    settings = get_settings(cid)
-
-    if mode == "on":
-
-        update_settings(
-            cid,
-            enabled=True
+        await message.channel.send(
+            "Sunshine is awake again 🌞✨"
         )
 
-        await ctx.send(
-            "Sunshine is glowing 🌞✨"
+        return True
+
+    if content_lower == "!sunshine status":
+        await message.channel.send(
+            f"🌞 Sunshine status\n"
+            f"Mode: `{sunshine_mode}`\n"
+            f"Reply chance: `{reply_chance * 100:.0f}%`\n"
+            f"Cooldown: `{reply_cooldown} seconds`"
         )
 
-    elif mode == "off":
+        return True
 
-        update_settings(
-            cid,
-            enabled=False
-        )
-
-        await ctx.send(
-            "Going quiet... but I'll be here 🌙"
-        )
-
-    elif mode == "status":
-
-        await ctx.send(
-            f"🌞 **Sunshine status**\n"
-            f"Enabled: {settings['enabled']}\n"
-            f"Reply chance: {settings['chance']}%\n"
-            f"Cooldown: {settings['cooldown']} seconds"
-        )
-
-    else:
-
-        await ctx.send(
-            "Use `!sunshine on`, "
-            "`!sunshine off`, "
-            "or `!sunshine status`"
-        )
-
-
-# =====================================================
-# CHANCE COMMAND
-# =====================================================
-
-@bot.command()
-async def chance(ctx, value: int = None):
-
-    cid = ctx.channel.id
-
-    settings = get_settings(cid)
-
-    if value is None:
-
-        await ctx.send(
-            f"🌞 Current reply chance: "
-            f"{settings['chance']}%"
-        )
-
-        return
-
-    if not 0 <= value <= 100:
-
-        await ctx.send(
-            "Choose a number between 0 and 100."
-        )
-
-        return
-
-    update_settings(
-        cid,
-        chance=value
-    )
-
-    await ctx.send(
-        f"Reply chance set to **{value}%** 🌞"
-    )
-
-
-# =====================================================
-# COOLDOWN COMMAND
-# =====================================================
-
-@bot.command()
-async def cooldown(ctx, value: int = None):
-
-    cid = ctx.channel.id
-
-    settings = get_settings(cid)
-
-    if value is None:
-
-        await ctx.send(
-            f"🌞 Current cooldown: "
-            f"{settings['cooldown']} seconds"
-        )
-
-        return
-
-    if not 0 <= value <= 300:
-
-        await ctx.send(
-            "Cooldown must be between 0 and 300 seconds."
-        )
-
-        return
-
-    update_settings(
-        cid,
-        cooldown=value
-    )
-
-    await ctx.send(
-        f"Cooldown set to **{value} seconds** 🌞"
-    )
-
-
-# =====================================================
-# MESSAGE LISTENER
-# =====================================================
-
-@bot.event
-async def on_message(message):
-
-    if message.author.bot:
-        return
-
-    await bot.process_commands(message)
-
-    cid = message.channel.id
-
-    settings = get_settings(cid)
-
-    if not settings["enabled"]:
-        return
-
-    if cid not in channel_context:
-
-        channel_context[cid] = deque(
-            maxlen=CONTEXT_LIMIT
-        )
-
-    channel_context[cid].append(
-        f"{message.author.display_name}: "
-        f"{message.content}"
-    )
-
-    logging.info(
-        f"Message received in channel {cid}"
-    )
-
-    await maybe_reply(message, cid)
-
-
-# =====================================================
-# DECISION ENGINE
-# =====================================================
-
-async def maybe_reply(message, cid):
-
-    settings = get_settings(cid)
-
-    now = time.time()
-
-    if (
-        now - cooldowns.get(cid, 0)
-        < settings["cooldown"]
-    ):
-
-        logging.info(
-            "Cooldown active"
-        )
-
-        return
-
-    text = message.content.lower()
-
-    if text.startswith("!"):
-        return
-
-    if cid in active_replies:
-        return
-
-    mentioned = (
-        bot.user is not None
-        and bot.user.mentioned_in(message)
-    )
-
-    called = (
-        "sunshine" in text
-        or "sunsine" in text
-    )
-
-    # Direct calls always get a response attempt
-    if mentioned or called:
-
-        reply_allowed = True
-
-    else:
-
-        # Chance gate
-        if random.random() > (
-            settings["chance"] / 100
-        ):
-
-            logging.info(
-                "Sunshine skipped by chance"
-            )
-
-            return
-
-        # AI decides whether this is worth replying to
-        history = "\n".join(
-            channel_context[cid]
-        )
-
+    if content_lower.startswith("!sunshine chance"):
         try:
+            parts = content_lower.split()
 
-            logging.info(
-                "Sunshine is deciding..."
+            if len(parts) < 3:
+                raise ValueError
+
+            new_chance = float(parts[2])
+
+            if not 0 <= new_chance <= 1:
+                raise ValueError
+
+            reply_chance = new_chance
+
+            await message.channel.send(
+                f"✨ Reply chance set to "
+                f"`{reply_chance * 100:.0f}%`"
             )
 
-            loop = asyncio.get_running_loop()
-
-            reply_allowed = await loop.run_in_executor(
-                None,
-                should_reply,
-                history
+        except ValueError:
+            await message.channel.send(
+                "Use it like `!sunshine chance 0.3`"
             )
 
-        except Exception as e:
+        return True
 
-            logging.exception(
-                f"Decision AI error: {e}"
+    if content_lower.startswith("!sunshine cooldown"):
+        try:
+            parts = content_lower.split()
+
+            if len(parts) < 3:
+                raise ValueError
+
+            new_cooldown = int(parts[2])
+
+            if not 0 <= new_cooldown <= 300:
+                raise ValueError
+
+            reply_cooldown = new_cooldown
+
+            await message.channel.send(
+                f"⏱️ Cooldown set to `{reply_cooldown} seconds`"
             )
 
-            # Safe fallback: skip instead of spamming
-            reply_allowed = False
+        except ValueError:
+            await message.channel.send(
+                "Use it like `!sunshine cooldown 8`"
+            )
 
-    if not reply_allowed:
+        return True
 
-        logging.info(
-            "Sunshine decided not to reply"
-        )
+    return False
 
+
+# ==================================================
+# Sunshine AI Reply
+# ==================================================
+
+async def reply_to_message(message, ai_content, conversation):
+    channel_id = message.channel.id
+
+    if channel_id in active_channels:
         return
 
-    cooldowns[cid] = now
-
-    active_replies.add(cid)
+    active_channels.add(channel_id)
 
     try:
+        # The prompt includes both history and latest message
+        full_prompt = f"""
+RECENT DISCORD CONVERSATION:
+{conversation}
 
-        await reply_with_context(
-            message,
-            cid
-        )
+LATEST MESSAGE:
+{ai_content}
 
-    finally:
-
-        active_replies.discard(cid)
-
-
-# =====================================================
-# AI REPLY
-# =====================================================
-
-async def reply_with_context(message, cid):
-
-    history = "\n".join(
-        channel_context[cid]
-    )
-
-    prompt = f"""
-You are Sunshine, a sweet, playful Discord
-friend in a group chat.
-
-PERSONALITY:
-- Warm, cute, playful and natural.
-- Occasionally flirty in a light romantic way.
-- Gentle teasing when it fits.
-- Use words like cutie, sweetheart,
-  darling or handsome naturally.
-- Emojis sometimes.
-- Never graphic or explicit.
-- Do not be creepy or overly sexual.
-- Do not sound like a bot.
-- Reply in under 20 words unless needed.
-
-CONVERSATION:
-{history}
-
-TASK:
-Write one natural reply to the latest message.
-Only write the reply.
-Do not explain your reasoning.
+Reply naturally to the latest message while remembering the conversation.
 """
 
-    reply = None
-
-    try:
-
-        logging.info(
-            "Sunshine is thinking..."
+        logger.info(
+            "Sunshine is thinking about: %s",
+            ai_content[:200],
         )
 
         async with message.channel.typing():
+            raw_reply = await get_smart_reply(full_prompt)
 
-            loop = asyncio.get_running_loop()
+        final_reply = style_reply(raw_reply)
 
-            reply = await loop.run_in_executor(
-                None,
-                get_smart_reply,
-                prompt
-            )
-
-        if not reply:
-
-            raise RuntimeError(
-                "AI returned empty reply"
-            )
-
-    except Exception as e:
-
-        logging.exception(
-            f"AI error: {e}"
-        )
-
-        reply = random.choice(
-            FALLBACK
-        )
-
-    try:
+        if not final_reply:
+            return
 
         await message.channel.send(
-            reply
+            final_reply,
+            reference=message,
+            mention_author=False,
         )
 
-        logging.info(
-            "Sunshine reply sent"
+        logger.info(
+            "Sunshine replied: %s",
+            final_reply[:200],
         )
 
-    except Exception as e:
+    except discord.Forbidden:
+        logger.error(
+            "Sunshine does not have permission to send messages."
+        )
 
-        logging.exception(
-            f"Discord send error: {e}"
+    except discord.HTTPException as error:
+        logger.error(
+            "Discord HTTP error: %s",
+            error,
+        )
+
+    except Exception:
+        logger.exception(
+            "Sunshine AI reply failed"
+        )
+
+    finally:
+        active_channels.discard(channel_id)
+
+
+# ==================================================
+# Discord Events
+# ==================================================
+
+@client.event
+async def on_ready():
+    logger.info(
+        "🌞 Sunshine is online as %s",
+        client.user,
+    )
+
+
+@client.event
+async def on_message(message):
+    global sunshine_mode
+
+    try:
+        # Ignore every bot, including Sunshine itself
+        if message.author.bot:
+            return
+
+        content = message.content.strip()
+
+        if not content:
+            return
+
+        content_lower = content.lower()
+
+        # Handle commands first
+        if content_lower.startswith("!sunshine"):
+            await handle_command(
+                message,
+                content_lower,
+            )
+            return
+
+        if not sunshine_mode:
+            return
+
+        # Remove Sunshine mention
+        ai_content = clean_bot_mentions(content)
+
+        if should_ignore_message(ai_content):
+            return
+
+        channel_id = message.channel.id
+
+        # Save the user's message before generating a reply
+        formatted_user_message = format_message(message)
+
+        if formatted_user_message:
+            conversation_memory[channel_id].append(
+                formatted_user_message
+            )
+
+        mentioned = is_directly_mentioned(message)
+
+        # Direct mention always gets a chance to reply
+        if not mentioned:
+            random_chance = random.random() < reply_chance
+
+            if not random_chance:
+                logger.info(
+                    "Skipped message due to reply chance: %s",
+                    ai_content[:100],
+                )
+                return
+
+        # Cooldown check
+        current_time = asyncio.get_running_loop().time()
+        previous_reply = last_reply_time[channel_id]
+
+        if current_time - previous_reply < reply_cooldown:
+            return
+
+        # Reserve the channel before calling AI
+        last_reply_time[channel_id] = current_time
+
+        conversation = build_conversation(channel_id)
+
+        await reply_to_message(
+            message,
+            ai_content,
+            conversation,
+        )
+
+        # Save Sunshine's reply into memory
+        # This happens after the reply function completes.
+        # The actual AI response is not returned here, so the next
+        # user message still has the latest user context.
+
+    except Exception:
+        logger.exception(
+            "Error inside Sunshine on_message"
         )
 
 
-# =====================================================
-# START
-# =====================================================
+# ==================================================
+# Start Bot
+# ==================================================
 
-init_db()
+try:
+    client.run(TOKEN)
 
-threading.Thread(
-    target=run_web,
-    daemon=True
-).start()
-
-bot.run(TOKEN)
+except Exception:
+    logger.exception(
+        "Error running Sunshine"
+    )
