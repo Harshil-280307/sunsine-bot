@@ -11,7 +11,7 @@ OPENROUTER_API_KEY = os.getenv(
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 
-MODEL = "meta-llama/llama-3-8b-instruct"
+MODEL = "openrouter/free"
 
 
 def get_smart_reply(prompt: str) -> str:
