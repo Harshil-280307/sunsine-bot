@@ -1,5 +1,7 @@
 
 import os
+import json
+import logging
 import requests
 
 from dotenv import load_dotenv
@@ -10,17 +12,20 @@ OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY"
 )
 
-URL = (
-    "https://openrouter.ai/api/v1/chat/completions"
-)
+URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODEL = "openrouter/free"
 
+logging.basicConfig(level=logging.INFO)
 
-def get_smart_reply(prompt: str) -> str:
+
+def call_openrouter(
+    messages,
+    temperature=0.85,
+    max_tokens=100
+):
 
     if not OPENROUTER_API_KEY:
-
         raise RuntimeError(
             "OPENROUTER_API_KEY missing"
         )
@@ -29,72 +34,137 @@ def get_smart_reply(prompt: str) -> str:
         "Authorization": (
             f"Bearer {OPENROUTER_API_KEY}"
         ),
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": (
+            "https://sunsine-bot.onrender.com"
+        ),
+        "X-Title": "Sunshine Discord Bot"
     }
 
     payload = {
-
         "model": MODEL,
-
-        "messages": [
-
-            {
-                "role": "system",
-
-                "content": (
-                    "You are Sunshine, a sweet, "
-                    "playful Discord friend. "
-                    "Be natural, warm, and occasionally "
-                    "lightly flirty. "
-                    "Use cute words like sweetheart "
-                    "or cutie when appropriate. "
-                    "Keep replies concise. "
-                    "Use emojis sometimes. "
-                    "Keep everything non-explicit "
-                    "and respectful."
-                )
-            },
-
-            {
-                "role": "user",
-                "content": prompt
-            }
-
-        ],
-
-        "temperature": 0.85,
-
-        "max_tokens": 60
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
     }
 
     response = requests.post(
         URL,
         headers=headers,
         json=payload,
-        timeout=20
+        timeout=45
     )
 
     if response.status_code != 200:
 
-        print(
-            "OPENROUTER ERROR:",
+        logging.error(
+            "OpenRouter error %s: %s",
             response.status_code,
-            response.text
+            response.text[:1000]
         )
 
     response.raise_for_status()
 
     data = response.json()
 
-    if (
-        "choices" not in data
-        or not data["choices"]
-    ):
+    choices = data.get("choices")
 
+    if not choices:
         raise RuntimeError(
-            f"Unexpected API response: {data}"
+            f"No choices in response: {data}"
         )
 
-    return data["choices"][0]["message"][
-        "content"
-    ].strip()
+    message = choices[0].get("message") or {}
+
+    content = message.get("content")
+
+    if not isinstance(content, str):
+        raise RuntimeError(
+            f"AI returned no text: {data}"
+        )
+
+    content = content.strip()
+
+    if not content:
+        raise RuntimeError(
+            "AI returned empty content"
+        )
+
+    return content
+
+
+def get_smart_reply(prompt: str) -> str:
+
+    messages = [
+
+        {
+            "role": "system",
+            "content": (
+                "You are Sunshine, a sweet, "
+                "playful Discord friend. "
+                "Be natural, affectionate, "
+                "and occasionally flirty. "
+                "Use cute words when appropriate. "
+                "You may use light romantic teasing "
+                "but never graphic sexual content. "
+                "Keep replies concise. "
+                "Use emojis sometimes. "
+                "Do not sound robotic."
+            )
+        },
+
+        {
+            "role": "user",
+            "content": prompt
+        }
+
+    ]
+
+    return call_openrouter(
+        messages,
+        temperature=0.85,
+        max_tokens=100
+    )
+
+
+def should_reply(
+    conversation: str
+) -> bool:
+
+    messages = [
+
+        {
+            "role": "system",
+            "content": (
+                "You are Sunshine's conversation "
+                "decision engine. "
+                "Decide whether Sunshine should "
+                "reply to a Discord group message. "
+                "Reply YES when the conversation "
+                "invites participation, asks a "
+                "question, includes a joke, or "
+                "would benefit from a natural "
+                "playful response. "
+                "Reply NO when the message is "
+                "routine, already answered, "
+                "spam, or does not need Sunshine. "
+                "Return ONLY YES or NO."
+            )
+        },
+
+        {
+            "role": "user",
+            "content": conversation
+        }
+
+    ]
+
+    result = call_openrouter(
+        messages,
+        temperature=0.2,
+        max_tokens=5
+    )
+
+    result = result.upper().strip()
+
+    return result.startswith("YES")
